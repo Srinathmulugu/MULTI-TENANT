@@ -38,84 +38,100 @@ export default function LoginPage() {
 
   return (
     <div className="screen-center">
-      <form className="card form" onSubmit={onSubmit}>
-        <h1>{mode === 'login' ? 'Organization Login' : 'Create Organization'}</h1>
+      <div className="auth-container">
+        <div className="auth-tabs">
+          <button
+            type="button"
+            className={`auth-tab ${mode === 'login' ? 'active' : ''}`}
+            onClick={() => setMode('login')}
+          >
+            Login
+          </button>
+          <button
+            type="button"
+            className={`auth-tab ${mode === 'register' ? 'active' : ''}`}
+            onClick={() => setMode('register')}
+          >
+            Create Account
+          </button>
+        </div>
 
-        {mode === 'register' && (
-          <>
-            <label>
-              Organization Name
-              <input
-                value={form.organizationName}
-                onChange={(event) => setForm((prev) => ({ ...prev, organizationName: event.target.value }))}
-                required
-              />
-            </label>
+        <form className="card form auth-form" onSubmit={onSubmit}>
+          <h1>{mode === 'login' ? 'Organization Login' : 'Create New Account'}</h1>
+
+          {mode === 'register' && (
+            <>
+              <label>
+                Organization Name
+                <input
+                  value={form.organizationName}
+                  onChange={(event) => setForm((prev) => ({ ...prev, organizationName: event.target.value }))}
+                  required
+                  placeholder="Acme Corp"
+                />
+              </label>
+              <label>
+                Organization Slug
+                <input
+                  value={form.organizationSlug}
+                  onChange={(event) => setForm((prev) => ({ ...prev, organizationSlug: event.target.value }))}
+                  required
+                  placeholder="acme-corp"
+                />
+              </label>
+              <label>
+                Admin Name
+                <input
+                  value={form.name}
+                  onChange={(event) => setForm((prev) => ({ ...prev, name: event.target.value }))}
+                  required
+                  placeholder="John Doe"
+                />
+              </label>
+            </>
+          )}
+
+          {mode === 'login' && (
             <label>
               Organization Slug
               <input
                 value={form.organizationSlug}
                 onChange={(event) => setForm((prev) => ({ ...prev, organizationSlug: event.target.value }))}
                 required
+                placeholder="acme-corp"
               />
             </label>
-            <label>
-              Admin Name
-              <input
-                value={form.name}
-                onChange={(event) => setForm((prev) => ({ ...prev, name: event.target.value }))}
-                required
-              />
-            </label>
-          </>
-        )}
+          )}
 
-        {mode === 'login' && (
           <label>
-            Organization Slug
+            Email
             <input
-              value={form.organizationSlug}
-              onChange={(event) => setForm((prev) => ({ ...prev, organizationSlug: event.target.value }))}
+              type="email"
+              value={form.email}
+              onChange={(event) => setForm((prev) => ({ ...prev, email: event.target.value }))}
               required
+              placeholder="you@example.com"
             />
           </label>
-        )}
 
-        <label>
-          Email
-          <input
-            type="email"
-            value={form.email}
-            onChange={(event) => setForm((prev) => ({ ...prev, email: event.target.value }))}
-            required
-          />
-        </label>
+          <label>
+            Password
+            <input
+              type="password"
+              value={form.password}
+              onChange={(event) => setForm((prev) => ({ ...prev, password: event.target.value }))}
+              required
+              placeholder="••••••••"
+            />
+          </label>
 
-        <label>
-          Password
-          <input
-            type="password"
-            value={form.password}
-            onChange={(event) => setForm((prev) => ({ ...prev, password: event.target.value }))}
-            required
-          />
-        </label>
+          {error && <p className="error">{error}</p>}
 
-        {error && <p className="error">{error}</p>}
-
-        <button type="submit">{mode === 'login' ? 'Login' : 'Create Organization'}</button>
-
-        <p className="muted">
-          {mode === 'login' ? 'Need an organization?' : 'Already have an organization?'}{' '}
-          <button
-            type="button"
-            className="link-button"
-            onClick={() => setMode((prev) => (prev === 'login' ? 'register' : 'login'))}
-          >
-            {mode === 'login' ? 'Register here' : 'Login here'}
+          <button type="submit" className="primary-button">
+            {mode === 'login' ? 'Login' : 'Create Account'}
           </button>
-        </p>
-      </form>
+        </form>
+      </div>
     </div>
   );
 }

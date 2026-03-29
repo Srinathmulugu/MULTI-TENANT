@@ -26,9 +26,10 @@ export default function ProjectDetailsPage() {
   });
   const [error, setError] = useState('');
 
+  const isProjectOwner = project && user && project.ownerId === user.userId;
   const canManageMembers = user?.role === 'org_admin';
   const canChangeStatus = ['org_admin', 'manager'].includes(user?.role);
-  const canCreateTasks = ['org_admin', 'manager'].includes(user?.role);
+  const canCreateTasks = ['org_admin', 'manager'].includes(user?.role) || isProjectOwner;
 
   async function loadProject() {
     try {
@@ -164,6 +165,19 @@ export default function ProjectDetailsPage() {
             </select>
           )}
         </div>
+        <div>
+          <h2>Project Owner</h2>
+          <div className="owner-card">
+            <div className="owner-info">
+              <strong>{project.ownerId?.name || 'Unknown'}</strong>
+              <p className="owner-email">{project.ownerId?.email}</p>
+              <p className="owner-role">{project.ownerId?.role}</p>
+            </div>
+            {isProjectOwner && (
+              <div className="owner-badge">👤 You are the owner</div>
+            )}
+          </div>
+        </div>
       </section>
 
       <section className="card">
@@ -208,7 +222,12 @@ export default function ProjectDetailsPage() {
       <section className="card">
         <div className="toolbar">
           <h2>Tasks</h2>
-          <span className="muted">Assign work to members, managers, or admins in this project workspace.</span>
+          <span className="muted">
+            {isProjectOwner 
+              ? 'As project owner, assign work to members, managers, or admins.'
+              : 'Assign work to members, managers, or admins in this project workspace.'
+            }
+          </span>
         </div>
 
         {canCreateTasks && (
@@ -263,27 +282,50 @@ export default function ProjectDetailsPage() {
         {!tasks.length && <p className="muted">No tasks added yet.</p>}
         <div className="stack-list">
           {tasks.map((task) => {
-            const canEditTask = canCreateTasks || task.assigneeId?._id === user?.id;
+            const canEditTask = canCreateTasks || task.assigneeId?._id === user?.userId;
             const canReassignTask = canCreateTasks;
+            const createdDate = new Date(task.createdAt).toLocaleDateString('en-US', {
+              month: 'short',
+              day: 'numeric',
+              hour: '2-digit',
+              minute: '2-digit'
+            });
 
             return (
               <article key={task._id} className="task-card">
                 <div className="project-card-top">
                   <div>
                     <strong>{task.title}</strong>
-                    <p className="muted">{task.description || 'No task description provided.'}</p>
+                    {task.description && <p className="muted task-description">{task.description}</p>}
                   </div>
                   <StatusBadge status={task.status} />
                 </div>
 
-                <div className="project-meta">
-                  <span>Assigned to {task.assigneeId?.name || 'Unknown user'}</span>
-                  <span>Created by {task.createdById?.name || 'Unknown user'}</span>
+                <div className="task-info-grid">
+                  <div className="task-info">
+                    <span className="label">📋 Assigned to</span>
+                    <span className="value">{task.assigneeId?.name || 'Unknown'}</span>
+                    <span className="role">{task.assigneeId?.role}</span>
+                  </div>
+                  <div className="task-info">
+                    <span className="label">👤 Assigned by</span>
+                    <span className="value">{task.createdById?.name || 'Unknown'}</span>
+                    <span className="role">{task.createdById?.role}</span>
+                  </div>
+                  <div className="task-info">
+                    <span className="label">📅 Created</span>
+                    <span className="value">{createdDate}</span>
+                  </div>
                 </div>
 
                 <div className="task-actions">
                   {canEditTask && (
-                    <select value={task.status} onChange={(event) => updateTask(task._id, { status: event.target.value })}>
+                    <select 
+                      className="action-select"
+                      title="Change task status"
+                      value={task.status} 
+                      onChange={(event) => updateTask(task._id, { status: event.target.value })}
+                    >
                       {STATUS_OPTIONS.map((status) => (
                         <option key={status} value={status}>
                           {status}
@@ -293,9 +335,12 @@ export default function ProjectDetailsPage() {
                   )}
                   {canReassignTask && (
                     <select
+                      className="action-select"
+                      title="Reassign task to another user"
                       value={task.assigneeId?._id || ''}
                       onChange={(event) => updateTask(task._id, { assigneeId: event.target.value })}
                     >
+                      <option value="" disabled>Reassign to...</option>
                       {assignableUsers.map((candidate) => (
                         <option key={candidate._id} value={candidate._id}>
                           {candidate.name} ({candidate.role})

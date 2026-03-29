@@ -48,6 +48,7 @@ router.get('/', async (request, response) => {
       .skip((currentPage - 1) * currentPageSize)
       .limit(currentPageSize)
       .populate('memberIds', '_id name email role')
+      .populate('ownerId', '_id name email')
       .select('_id organizationId name description status ownerId memberIds createdAt updatedAt'),
     Project.countDocuments(query)
   ]);
@@ -85,7 +86,9 @@ router.get('/:id', async (request, response) => {
   const project = await Project.findOne({
     _id: request.params.id,
     organizationId: request.user.organizationId
-  }).populate('memberIds', '_id name email role');
+  })
+    .populate('memberIds', '_id name email role')
+    .populate('ownerId', '_id name email role');
 
   if (!project) {
     response.status(404).json({ error: 'Project not found.' });
@@ -255,11 +258,6 @@ router.delete('/:id', async (request, response) => {
 });
 
 router.post('/:id/tasks', async (request, response) => {
-  if (!['org_admin', 'manager'].includes(request.user.role)) {
-    response.status(403).json({ error: 'Only admins and managers can create tasks.' });
-    return;
-  }
-
   const { title, description = '', assigneeId, status = 'Pending' } = request.body || {};
   if (!title || !assigneeId) {
     response.status(400).json({ error: 'Task title and assignee are required.' });
@@ -278,6 +276,14 @@ router.post('/:id/tasks', async (request, response) => {
 
   if (!project) {
     response.status(404).json({ error: 'Project not found.' });
+    return;
+  }
+
+  const isProjectOwner = project.ownerId.toString() === request.user.userId;
+  const canCreateTask = ['org_admin', 'manager'].includes(request.user.role) || isProjectOwner;
+
+  if (!canCreateTask) {
+    response.status(403).json({ error: 'Only admins, managers, or project owner can create tasks.' });
     return;
   }
 
@@ -343,7 +349,8 @@ router.patch('/:projectId/tasks/:taskId', async (request, response) => {
   }
 
   const isAssignee = task.assigneeId.toString() === request.user.userId;
-  const canManageTask = ['org_admin', 'manager'].includes(request.user.role);
+  const isProjectOwner = project.ownerId.toString() === request.user.userId;
+  const canManageTask = ['org_admin', 'manager'].includes(request.user.role) || isProjectOwner;
 
   if (!canManageTask && !isAssignee) {
     response.status(403).json({ error: 'You cannot update this task.' });
@@ -360,7 +367,7 @@ router.patch('/:projectId/tasks/:taskId', async (request, response) => {
 
   if (assigneeId) {
     if (!canManageTask) {
-      response.status(403).json({ error: 'Only admins and managers can reassign tasks.' });
+      response.status(403).json({ error: 'Only admins, managers, or project owner can reassign tasks.' });
       return;
     }
 
