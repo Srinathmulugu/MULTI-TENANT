@@ -9,6 +9,16 @@ export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
 
+  async function refreshUser() {
+    if (!token) {
+      return null;
+    }
+
+    const payload = await apiRequest('/auth/me');
+    setUser(payload.user);
+    return payload.user;
+  }
+
   useEffect(() => {
     async function loadUser() {
       if (!token) {
@@ -37,20 +47,24 @@ export function AuthProvider({ children }) {
       token,
       user,
       loading,
-      async login({ organizationSlug, email, password }) {
+      refreshUser,
+      updateUser(updates) {
+        setUser((current) => (current ? { ...current, ...updates } : current));
+      },
+      async login({ email, password }) {
         const payload = await apiRequest('/auth/login', {
           method: 'POST',
-          body: JSON.stringify({ organizationSlug, email, password })
+          body: JSON.stringify({ email, password })
         });
 
         localStorage.setItem('mt_token', payload.token);
         setToken(payload.token);
         setUser(payload.user);
       },
-      async registerOrg({ organizationName, organizationSlug, name, email, password }) {
+      async registerOrg({ organizationName, name, email, password }) {
         const payload = await apiRequest('/auth/register-organization', {
           method: 'POST',
-          body: JSON.stringify({ organizationName, organizationSlug, name, email, password })
+          body: JSON.stringify({ organizationName, name, email, password })
         });
 
         localStorage.setItem('mt_token', payload.token);

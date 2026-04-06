@@ -7,7 +7,16 @@ const userSchema = new mongoose.Schema(
     email: { type: String, required: true, trim: true, lowercase: true },
     passwordHash: { type: String, required: true },
     role: { type: String, enum: ['org_admin', 'manager', 'member'], default: 'member' },
-    isActive: { type: Boolean, default: true }
+    isActive: { type: Boolean, default: true },
+    avatarUrl: { type: String, default: '' },
+    lastLogin: { type: Date, default: null },
+    preferences: {
+      emailNotifications: { type: Boolean, default: true },
+      projectUpdates: { type: Boolean, default: true },
+      defaultProjectView: { type: String, enum: ['list', 'card'], default: 'list' },
+      sortPreference: { type: String, default: 'newest' },
+      theme: { type: String, enum: ['light', 'dark'], default: 'light' }
+    }
   },
   { timestamps: true }
 );

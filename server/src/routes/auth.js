@@ -9,10 +9,12 @@ import { requireAuth } from '../middleware/auth.js';
 const router = express.Router();
 
 function signToken(user) {
+  const organizationId = user.organizationId?._id || user.organizationId;
+
   return jwt.sign(
     {
       userId: user._id.toString(),
-      organizationId: user.organizationId.toString(),
+      organizationId: organizationId.toString(),
       role: user.role,
       email: user.email,
       name: user.name
@@ -22,20 +24,35 @@ function signToken(user) {
   );
 }
 
-router.post('/register-organization', async (request, response) => {
-  const { organizationName, organizationSlug, name, email, password } = request.body || {};
+function slugify(value) {
+  return String(value)
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
 
-  if (!organizationName || !organizationSlug || !name || !email || !password) {
+router.post('/register-organization', async (request, response) => {
+  const { organizationName, name, email, password } = request.body || {};
+
+  if (!organizationName || !name || !email || !password) {
     response.status(400).json({ error: 'All registration fields are required.' });
     return;
   }
 
-  const normalizedSlug = String(organizationSlug).toLowerCase().trim();
+  const baseSlug = slugify(organizationName);
   const normalizedEmail = String(email).toLowerCase().trim();
 
-  const existingOrganization = await Organization.findOne({ slug: normalizedSlug });
-  if (existingOrganization) {
-    response.status(409).json({ error: 'Organization slug is already in use.' });
+  let normalizedSlug = baseSlug;
+  let suffix = 1;
+
+  while (await Organization.findOne({ slug: normalizedSlug })) {
+    suffix += 1;
+    normalizedSlug = `${baseSlug}-${suffix}`;
+  }
+
+  if (!normalizedSlug) {
+    response.status(400).json({ error: 'Organization name must contain letters or numbers.' });
     return;
   }
 
@@ -62,33 +79,46 @@ router.post('/register-organization', async (request, response) => {
       name: user.name,
       email: user.email,
       role: user.role,
-      organizationSlug: organization.slug
+      organizationSlug: organization.slug,
+      organizationName: organization.name,
+      avatarUrl: user.avatarUrl,
+      lastLogin: user.lastLogin,
+      preferences: user.preferences,
+      organizationSettings: organization.settings
     }
   });
 });
 
 router.post('/login', async (request, response) => {
-  const { organizationSlug, email, password } = request.body || {};
+  const { email, password } = request.body || {};
 
-  if (!organizationSlug || !email || !password) {
-    response.status(400).json({ error: 'organizationSlug, email, and password are required.' });
+  if (!email || !password) {
+    response.status(400).json({ error: 'email and password are required.' });
     return;
   }
 
-  const normalizedSlug = String(organizationSlug).toLowerCase().trim();
   const normalizedEmail = String(email).toLowerCase().trim();
 
-  const organization = await Organization.findOne({ slug: normalizedSlug, status: 'active' });
-  if (!organization) {
+  const users = await User.find({
+    email: normalizedEmail,
+    isActive: true
+  }).populate('organizationId', 'slug name status');
+
+  const validAccounts = users.filter((user) => user.organizationId?.status === 'active');
+
+  if (!validAccounts.length) {
     response.status(401).json({ error: 'Invalid credentials.' });
     return;
   }
 
-  const user = await User.findOne({
-    organizationId: organization._id,
-    email: normalizedEmail,
-    isActive: true
-  });
+  if (validAccounts.length > 1) {
+    response.status(409).json({
+      error: 'Multiple organizations use this email. Use a unique email or ask your admin to consolidate accounts.'
+    });
+    return;
+  }
+
+  const user = validAccounts[0];
 
   if (!user) {
     response.status(401).json({ error: 'Invalid credentials.' });
@@ -101,16 +131,23 @@ router.post('/login', async (request, response) => {
     return;
   }
 
+  await User.updateOne({ _id: user._id }, { $set: { lastLogin: new Date() } });
+
   const token = signToken(user);
   response.json({
     token,
     user: {
       id: user._id,
-      organizationId: user.organizationId,
+      organizationId: user.organizationId?._id || user.organizationId,
       name: user.name,
       email: user.email,
       role: user.role,
-      organizationSlug: organization.slug
+      organizationSlug: user.organizationId?.slug,
+      organizationName: user.organizationId?.name,
+      avatarUrl: user.avatarUrl,
+      lastLogin: new Date(),
+      preferences: user.preferences,
+      organizationSettings: user.organizationId?.settings
     }
   });
 });
@@ -120,7 +157,75 @@ router.get('/me', requireAuth, async (request, response) => {
     _id: request.user.userId,
     organizationId: request.user.organizationId,
     isActive: true
-  }).select('_id organizationId name email role');
+  }).select('_id organizationId name email role avatarUrl lastLogin preferences');
+
+  if (!user) {
+    response.status(404).json({ error: 'User not found.' });
+    return;
+  }
+
+  const organization = await Organization.findById(request.user.organizationId).select('slug name settings');
+
+  response.json({
+    user: {
+      id: user._id,
+      organizationId: user.organizationId,
+      name: user.name,
+      email: user.email,
+      role: user.role,
+      organizationSlug: organization?.slug,
+      organizationName: organization?.name,
+      avatarUrl: user.avatarUrl,
+      lastLogin: user.lastLogin,
+      preferences: user.preferences,
+      organizationSettings: organization?.settings
+    }
+  });
+});
+
+router.patch('/me', requireAuth, async (request, response) => {
+  const { name, avatarUrl, preferences } = request.body || {};
+  const updates = {};
+
+  if (name !== undefined) {
+    const normalizedName = String(name).trim();
+    if (!normalizedName) {
+      response.status(400).json({ error: 'Name cannot be empty.' });
+      return;
+    }
+    updates.name = normalizedName;
+  }
+
+  if (avatarUrl !== undefined) {
+    updates.avatarUrl = String(avatarUrl).trim();
+  }
+
+  if (preferences !== undefined) {
+    updates.preferences = {
+      emailNotifications: Boolean(preferences.emailNotifications),
+      projectUpdates: Boolean(preferences.projectUpdates),
+      defaultProjectView: ['list', 'card'].includes(preferences.defaultProjectView)
+        ? preferences.defaultProjectView
+        : 'list',
+      sortPreference: String(preferences.sortPreference || 'newest'),
+      theme: ['light', 'dark'].includes(preferences.theme) ? preferences.theme : 'light'
+    };
+  }
+
+  if (!Object.keys(updates).length) {
+    response.status(400).json({ error: 'No profile updates were provided.' });
+    return;
+  }
+
+  const user = await User.findOneAndUpdate(
+    {
+      _id: request.user.userId,
+      organizationId: request.user.organizationId,
+      isActive: true
+    },
+    updates,
+    { new: true }
+  ).select('_id organizationId name email role avatarUrl lastLogin preferences');
 
   if (!user) {
     response.status(404).json({ error: 'User not found.' });
@@ -137,9 +242,51 @@ router.get('/me', requireAuth, async (request, response) => {
       email: user.email,
       role: user.role,
       organizationSlug: organization?.slug,
-      organizationName: organization?.name
+      organizationName: organization?.name,
+      avatarUrl: user.avatarUrl,
+      lastLogin: user.lastLogin,
+      preferences: user.preferences
     }
   });
+});
+
+router.patch('/me/password', requireAuth, async (request, response) => {
+  const { currentPassword, newPassword } = request.body || {};
+
+  if (!currentPassword || !newPassword) {
+    response.status(400).json({ error: 'currentPassword and newPassword are required.' });
+    return;
+  }
+
+  const user = await User.findOne({
+    _id: request.user.userId,
+    organizationId: request.user.organizationId,
+    isActive: true
+  });
+
+  if (!user) {
+    response.status(404).json({ error: 'User not found.' });
+    return;
+  }
+
+  const isCurrentPasswordValid = await bcrypt.compare(String(currentPassword), user.passwordHash);
+  if (!isCurrentPasswordValid) {
+    response.status(401).json({ error: 'Current password is incorrect.' });
+    return;
+  }
+
+  const organization = await Organization.findById(request.user.organizationId).select('settings.passwordMinLength');
+  const minimumLength = organization?.settings?.passwordMinLength || 8;
+
+  if (String(newPassword).trim().length < minimumLength) {
+    response.status(400).json({ error: `New password must be at least ${minimumLength} characters long.` });
+    return;
+  }
+
+  user.passwordHash = await bcrypt.hash(String(newPassword), 10);
+  await user.save();
+
+  response.json({ success: true });
 });
 
 export default router;

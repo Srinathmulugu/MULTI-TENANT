@@ -8,19 +8,38 @@ import { useAuth } from '../context/AuthContext.jsx';
 import { useNotifications } from '../context/NotificationContext.jsx';
 
 const STATUS_OPTIONS = ['Pending', 'In Progress', 'Completed'];
+const STATUS_PROGRESS = {
+  Pending: 25,
+  'In Progress': 60,
+  Completed: 100
+};
+const DESCRIPTION_LIMIT = 300;
+const DESCRIPTION_SUGGESTIONS = ['Web Development Project', 'Testing Phase', 'Deployment Task'];
+const DATE_FORMATTER = new Intl.DateTimeFormat('en-GB');
+
+const INITIAL_FORM = {
+  name: '',
+  description: '',
+  status: 'Pending',
+  startDate: '',
+  endDate: '',
+  memberIds: []
+};
 
 export default function Dashboard() {
   const { user } = useAuth();
   const { notify } = useNotifications();
+  const isMember = user?.role === 'member';
   const [projects, setProjects] = useState([]);
   const [users, setUsers] = useState([]);
   const [stats, setStats] = useState(null);
-  const [showCreateForm, setShowCreateForm] = useState(true);
-  const [name, setName] = useState('');
-  const [description, setDescription] = useState('');
-  const [memberIds, setMemberIds] = useState([]);
+  const [showCreateForm, setShowCreateForm] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [editingProjectId, setEditingProjectId] = useState('');
+  const [form, setForm] = useState(INITIAL_FORM);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
+  const [projectScope, setProjectScope] = useState('all');
   const [sort, setSort] = useState('newest');
   const [page, setPage] = useState(1);
   const [pagination, setPagination] = useState({ page: 1, totalPages: 1, total: 0 });
@@ -29,21 +48,32 @@ export default function Dashboard() {
   const canCreate = user?.role === 'org_admin';
   const canChangeStatus = ['org_admin', 'manager'].includes(user?.role);
   const canDelete = user?.role === 'org_admin';
+  const canEdit = user?.role === 'org_admin';
 
-  async function loadProjects() {
+  async function loadProjects(overrides = {}) {
     try {
+      const currentPage = overrides.page ?? page;
+      const currentSearch = overrides.search ?? search;
+      const currentStatusFilter = overrides.statusFilter ?? statusFilter;
+      const currentScope = overrides.scope ?? projectScope;
+      const currentSort = overrides.sort ?? sort;
+
       const params = new URLSearchParams({
-        page: String(page),
+        page: String(currentPage),
         pageSize: '5',
-        sort
+        sort: currentSort
       });
 
-      if (search.trim()) {
-        params.set('search', search.trim());
+      if (currentSearch.trim()) {
+        params.set('search', currentSearch.trim());
       }
 
-      if (statusFilter) {
-        params.set('status', statusFilter);
+      if (currentStatusFilter) {
+        params.set('status', currentStatusFilter);
+      }
+
+      if (isMember || currentScope === 'my') {
+        params.set('mine', '1');
       }
 
       const payload = await apiRequest(`/projects?${params.toString()}`);
@@ -72,19 +102,19 @@ export default function Dashboard() {
       const payload = await apiRequest('/admin/users');
       setUsers(payload.users);
     } catch (loadError) {
-      setError(loadError.message);
+      console.error('Failed to load organization users:', loadError);
     }
   }
 
   useEffect(() => {
     loadProjects();
-  }, [page, search, statusFilter, sort]);
+  }, [page, search, statusFilter, projectScope, sort, isMember]);
 
   useEffect(() => {
-    if (!projects.length) {
-      setShowCreateForm(true);
+    if (isMember) {
+      setProjectScope('my');
     }
-  }, [projects.length]);
+  }, [isMember]);
 
   useEffect(() => {
     loadStats();
@@ -94,35 +124,115 @@ export default function Dashboard() {
     loadUsers();
   }, [canCreate]);
 
-  async function createProject(event) {
+  function resetProjectForm() {
+    setForm(INITIAL_FORM);
+    setEditingProjectId('');
+  }
+
+  function beginEditProject(project) {
+    setShowCreateForm(true);
+    setEditingProjectId(project._id);
+    setForm({
+      name: project.name || '',
+      description: project.description || '',
+      status: project.status || 'Pending',
+      startDate: project.startDate ? new Date(project.startDate).toISOString().slice(0, 10) : '',
+      endDate: project.endDate ? new Date(project.endDate).toISOString().slice(0, 10) : '',
+      memberIds: (project.memberIds || []).map((member) => member._id || member)
+    });
+    setError('');
+  }
+
+  function applyDescriptionSuggestion(suggestion) {
+    setForm((current) => ({
+      ...current,
+      description: suggestion.slice(0, DESCRIPTION_LIMIT)
+    }));
+  }
+
+  function upsertProject(nextProject) {
+    setProjects((current) => {
+      const existingIndex = current.findIndex((project) => project._id === nextProject._id);
+      if (existingIndex === -1) {
+        return [nextProject, ...current];
+      }
+
+      const nextList = [...current];
+      nextList[existingIndex] = nextProject;
+      return nextList;
+    });
+  }
+
+  function removeProject(projectId) {
+    setProjects((current) => current.filter((project) => project._id !== projectId));
+  }
+
+  async function submitProject(event) {
     event.preventDefault();
     setError('');
 
+    if (!form.name.trim()) {
+      setError('Project name is required.');
+      return;
+    }
+
+    if (form.description.length > DESCRIPTION_LIMIT) {
+      setError(`Description cannot exceed ${DESCRIPTION_LIMIT} characters.`);
+      return;
+    }
+
+    if (form.startDate && form.endDate && new Date(form.startDate) > new Date(form.endDate)) {
+      setError('Start date must be before or equal to end date.');
+      return;
+    }
+
+    setIsSubmitting(true);
+
+    const projectPayload = {
+      name: form.name.trim(),
+      description: form.description.trim(),
+      status: form.status,
+      startDate: form.startDate || null,
+      endDate: form.endDate || null,
+      memberIds: form.memberIds
+    };
+
     try {
-      await apiRequest('/projects', {
-        method: 'POST',
-        body: JSON.stringify({ name, description, memberIds })
-      });
-      setName('');
-      setDescription('');
-      setMemberIds([]);
+      if (editingProjectId) {
+        const response = await apiRequest(`/projects/${editingProjectId}`, {
+          method: 'PATCH',
+          body: JSON.stringify(projectPayload)
+        });
+        upsertProject(response.project);
+        notify('Project Updated Successfully');
+      } else {
+        const response = await apiRequest('/projects', {
+          method: 'POST',
+          body: JSON.stringify(projectPayload)
+        });
+        upsertProject(response.project);
+        notify('Project Created Successfully');
+      }
+
+      resetProjectForm();
       setShowCreateForm(false);
-      notify('New project added');
-      await loadProjects();
+
       await loadStats();
-    } catch (createError) {
-      setError(createError.message);
+    } catch (submitError) {
+      setError(submitError.message);
+    } finally {
+      setIsSubmitting(false);
     }
   }
 
   async function updateStatus(projectId, status) {
     try {
-      await apiRequest(`/projects/${projectId}/status`, {
+      const payload = await apiRequest(`/projects/${projectId}/status`, {
         method: 'PATCH',
         body: JSON.stringify({ status })
       });
+      upsertProject(payload.project);
       notify(`Status changed to ${status}`);
-      await loadProjects();
       await loadStats();
     } catch (updateError) {
       setError(updateError.message);
@@ -132,12 +242,48 @@ export default function Dashboard() {
   async function deleteProject(projectId) {
     try {
       await apiRequest(`/projects/${projectId}`, { method: 'DELETE' });
+      removeProject(projectId);
       notify('Project deleted');
-      await loadProjects();
       await loadStats();
     } catch (deleteError) {
       setError(deleteError.message);
     }
+  }
+
+  function getMembers(project) {
+    return (project.memberIds || []).filter((member) => typeof member === 'object' && member !== null);
+  }
+
+  function getMemberInitials(name = '') {
+    const parts = String(name)
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean)
+      .slice(0, 2);
+
+    if (!parts.length) {
+      return 'U';
+    }
+
+    return parts.map((part) => part[0]?.toUpperCase() || '').join('');
+  }
+
+  function formatDate(value) {
+    if (!value) {
+      return '—';
+    }
+
+    return DATE_FORMATTER.format(new Date(value));
+  }
+
+  function getProjectProgress(status) {
+    return STATUS_PROGRESS[status] || 0;
+  }
+
+  async function quickUpdateStatus(project) {
+    const currentIndex = STATUS_OPTIONS.indexOf(project.status);
+    const nextStatus = STATUS_OPTIONS[(currentIndex + 1) % STATUS_OPTIONS.length];
+    await updateStatus(project._id, nextStatus);
   }
 
   return (
@@ -146,11 +292,19 @@ export default function Dashboard() {
         <div>
           <p className="eyebrow">Workspace</p>
           <h1>Projects Dashboard</h1>
-          <p className="muted">Track workflow, members, and role-based actions inside your organization.</p>
+          <p className="muted">Dashboard is role-based and shows personalized data for each user.</p>
         </div>
         {canCreate && (
-          <button onClick={() => setShowCreateForm((current) => !current)}>
-            {showCreateForm ? 'Hide Create Project' : 'New Project'}
+          <button
+            className="toggle-btn"
+            onClick={() => {
+              if (showCreateForm) {
+                resetProjectForm();
+              }
+              setShowCreateForm((current) => !current);
+            }}
+          >
+            {showCreateForm ? 'Hide Create Project' : 'Create Project'}
           </button>
         )}
       </section>
@@ -161,15 +315,15 @@ export default function Dashboard() {
             <span>Total projects</span>
             <strong>{stats.totalProjects}</strong>
           </article>
-          <article className="card stat-card">
+          <article className="card stat-card stat-completed">
             <span>Completed</span>
             <strong>{stats.completedProjects}</strong>
           </article>
-          <article className="card stat-card">
+          <article className="card stat-card stat-progress">
             <span>In Progress</span>
             <strong>{stats.inProgressProjects}</strong>
           </article>
-          <article className="card stat-card">
+          <article className="card stat-card stat-pending">
             <span>Pending</span>
             <strong>{stats.pendingProjects}</strong>
           </article>
@@ -178,22 +332,88 @@ export default function Dashboard() {
 
       {canCreate && showCreateForm && (
         <section className="card">
-          <h2>Create Project</h2>
-          <form className="form" onSubmit={createProject}>
-            <label>
-              Name
-              <input value={name} onChange={(event) => setName(event.target.value)} required />
-            </label>
+          <h2>{editingProjectId ? 'Edit Project' : 'Create Project'}</h2>
+          <form className="form" onSubmit={submitProject}>
+            <div className="form-grid">
+              <label>
+                Project Name
+                <input
+                  value={form.name}
+                  onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))}
+                  required
+                />
+              </label>
+
+              <label>
+                Status
+                <select
+                  value={form.status}
+                  onChange={(event) => setForm((current) => ({ ...current, status: event.target.value }))}
+                >
+                  {STATUS_OPTIONS.map((status) => (
+                    <option key={status} value={status}>
+                      {status}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label>
+                Start Date
+                <input
+                  type="date"
+                  value={form.startDate}
+                  onChange={(event) => setForm((current) => ({ ...current, startDate: event.target.value }))}
+                />
+              </label>
+
+              <label>
+                End Date
+                <input
+                  type="date"
+                  value={form.endDate}
+                  onChange={(event) => setForm((current) => ({ ...current, endDate: event.target.value }))}
+                />
+              </label>
+            </div>
+
             <label>
               Description
-              <textarea value={description} onChange={(event) => setDescription(event.target.value)} />
+              <textarea
+                value={form.description}
+                maxLength={DESCRIPTION_LIMIT}
+                placeholder="Enter project goal, tasks, and expected outcome..."
+                onChange={(event) => setForm((current) => ({ ...current, description: event.target.value }))}
+              />
+              <div className="description-meta">
+                <span className="muted">{form.description.length} / {DESCRIPTION_LIMIT} characters</span>
+              </div>
             </label>
+
+            <div className="suggestion-row">
+              {DESCRIPTION_SUGGESTIONS.map((suggestion) => (
+                <button
+                  key={suggestion}
+                  type="button"
+                  className="suggestion-chip"
+                  onClick={() => applyDescriptionSuggestion(suggestion)}
+                >
+                  {suggestion}
+                </button>
+              ))}
+            </div>
+
             <label>
-              Assign members
+              Assign Members
               <select
                 multiple
-                value={memberIds}
-                onChange={(event) => setMemberIds([...event.target.selectedOptions].map((option) => option.value))}
+                value={form.memberIds}
+                onChange={(event) =>
+                  setForm((current) => ({
+                    ...current,
+                    memberIds: [...event.target.selectedOptions].map((option) => option.value)
+                  }))
+                }
               >
                 {users.map((member) => (
                   <option key={member._id} value={member._id}>
@@ -202,28 +422,77 @@ export default function Dashboard() {
                 ))}
               </select>
             </label>
-            <button type="submit">Create</button>
+
+            <div className="form-actions">
+              {editingProjectId && (
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={() => {
+                    resetProjectForm();
+                    setShowCreateForm(false);
+                  }}
+                >
+                  Cancel
+                </button>
+              )}
+              <button type="submit" disabled={isSubmitting}>
+                {isSubmitting ? (editingProjectId ? 'Saving...' : 'Creating...') : editingProjectId ? 'Save Changes' : 'Create'}
+              </button>
+            </div>
           </form>
         </section>
       )}
 
-      <section className="card">
+      <section id="projects" className="card">
         <div className="toolbar">
-          <h2>Projects in your organization</h2>
+          <div>
+            <h2>{isMember ? 'My Projects' : 'Projects in your organization'}</h2>
+            <p className="muted">Search and filter projects by status, scope, and sort order.</p>
+          </div>
           <div className="toolbar-controls">
             {canCreate && (
-              <button onClick={() => setShowCreateForm(true)}>
+              <button
+                onClick={() => {
+                  resetProjectForm();
+                  setShowCreateForm(true);
+                }}
+              >
                 New Project
               </button>
             )}
             <input
-              placeholder="Search by project name"
+              placeholder="🔍 Search projects by name..."
               value={search}
               onChange={(event) => {
                 setPage(1);
                 setSearch(event.target.value);
               }}
             />
+            {search && (
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => {
+                  setPage(1);
+                  setSearch('');
+                }}
+              >
+                ❌ Clear
+              </button>
+            )}
+            {!isMember && (
+              <select
+                value={projectScope}
+                onChange={(event) => {
+                  setPage(1);
+                  setProjectScope(event.target.value);
+                }}
+              >
+                <option value="all">All Projects</option>
+                <option value="my">My Projects</option>
+              </select>
+            )}
             <select
               value={statusFilter}
               onChange={(event) => {
@@ -248,40 +517,82 @@ export default function Dashboard() {
         </div>
 
         {error && <p className="error">{error}</p>}
-        {!projects.length && <p className="muted">No projects match the current filters.</p>}
+        {!projects.length && (
+          <div className="empty-state">
+            <p className="empty-state-title">📭 {isMember ? 'No projects assigned to you yet' : 'No projects yet'}</p>
+            <p className="muted">
+              {isMember
+                ? 'Your assigned projects will appear here once you are added as a member.'
+                : 'Create your first project to get started!'}
+            </p>
+          </div>
+        )}
 
-        <div className="project-list">
-          {projects.map((project) => (
-            <article key={project._id} className="project-card card">
-              <div className="project-card-top">
-                <div>
-                  <Link className="project-link" to={`/projects/${project._id}`}>
-                    {project.name}
-                  </Link>
-                  <p className="muted">{project.description || 'No description'}</p>
-                </div>
-                <StatusBadge status={project.status} />
-              </div>
-
-              <div className="project-meta">
-                <span>{project.memberIds?.length || 0} member(s)</span>
-                <span>Created {new Date(project.createdAt).toLocaleDateString()}</span>
-              </div>
-
-              <div className="project-actions">
-                {canChangeStatus && (
-                  <select value={project.status} onChange={(event) => updateStatus(project._id, event.target.value)}>
-                    {STATUS_OPTIONS.map((status) => (
-                      <option key={status} value={status}>
-                        {status}
-                      </option>
-                    ))}
-                  </select>
-                )}
-                {canDelete && <button onClick={() => deleteProject(project._id)}>Delete</button>}
-              </div>
-            </article>
-          ))}
+        <div className="table-wrapper">
+          <table className="project-table">
+            <thead>
+              <tr>
+                <th>Project</th>
+                <th>Status</th>
+                <th>Progress</th>
+                <th>Start</th>
+                <th>End</th>
+                <th>Last Updated</th>
+                <th>Members</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {projects.map((project) => (
+                <tr key={project._id}>
+                  <td>
+                    <Link className="project-link project-name" to={`/projects/${project._id}`}>
+                      {project.name}
+                    </Link>
+                    <p className="table-subtext">{project.description || 'No description'}</p>
+                  </td>
+                  <td>
+                    <StatusBadge status={project.status} />
+                  </td>
+                  <td>
+                    <div className="progress-bar" aria-label="Project progress">
+                      <div className="progress-fill" style={{ width: `${getProjectProgress(project.status)}%` }} />
+                    </div>
+                    <p className="table-subtext">{getProjectProgress(project.status)}%</p>
+                  </td>
+                  <td>{formatDate(project.startDate)}</td>
+                  <td>{formatDate(project.endDate)}</td>
+                  <td>{formatDate(project.updatedAt)}</td>
+                  <td>
+                    <div className="member-cell">
+                      <div className="member-pill-list">
+                        {getMembers(project)
+                          .slice(0, 3)
+                          .map((member) => (
+                            <span key={member._id} className="member-mini-avatar" title={member.name}>
+                              {getMemberInitials(member.name)}
+                            </span>
+                          ))}
+                      </div>
+                      <p className="table-subtext">👤 {project.memberIds?.length || 0} members</p>
+                    </div>
+                  </td>
+                  <td>
+                    <div className="project-actions">
+                      <Link className="secondary-button quick-action-link" to={`/projects/${project._id}`}>
+                        View
+                      </Link>
+                      {canEdit && <button onClick={() => beginEditProject(project)}>Edit</button>}
+                      {canChangeStatus && (
+                        <button onClick={() => quickUpdateStatus(project)}>Update Status</button>
+                      )}
+                      {canDelete && <button onClick={() => deleteProject(project._id)}>Delete</button>}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
 
         <div className="pagination-row">
@@ -291,10 +602,7 @@ export default function Dashboard() {
           <span>
             Page {pagination.page} of {pagination.totalPages}
           </span>
-          <button
-            disabled={pagination.page >= pagination.totalPages}
-            onClick={() => setPage((current) => current + 1)}
-          >
+          <button disabled={pagination.page >= pagination.totalPages} onClick={() => setPage((current) => current + 1)}>
             Next
           </button>
         </div>

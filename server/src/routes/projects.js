@@ -1,4 +1,10 @@
 import express from 'express';
+import fs from 'fs';
+import fsp from 'fs/promises';
+import { createRequire } from 'module';
+import path from 'path';
+
+import multer from 'multer';
 
 import { requireAuth } from '../middleware/auth.js';
 import { ActivityLog } from '../models/ActivityLog.js';
@@ -7,15 +13,76 @@ import { Task } from '../models/Task.js';
 import { User } from '../models/User.js';
 
 const router = express.Router();
+const require = createRequire(import.meta.url);
+const archiver = require('archiver');
+const uploadsDir = path.resolve(process.cwd(), 'uploads', 'project-submissions');
+const MAX_UPLOAD_SIZE = 10 * 1024 * 1024;
 
 const STATUS_VALUES = ['Pending', 'In Progress', 'Completed'];
+const SUBMISSION_VALUES = ['Submitted', 'Approved', 'Rejected'];
+
+const upload = multer({
+  storage: multer.diskStorage({
+    destination(request, file, callback) {
+      fsp.mkdir(uploadsDir, { recursive: true })
+        .then(() => callback(null, uploadsDir))
+        .catch((error) => callback(error));
+    },
+    filename(request, file, callback) {
+      const safeName = String(file.originalname || 'submission').replace(/[^a-zA-Z0-9._-]/g, '_');
+      callback(null, `${Date.now()}-${safeName}`);
+    }
+  }),
+  limits: { fileSize: MAX_UPLOAD_SIZE }
+});
 
 router.use(requireAuth);
+
+function isProjectParticipant(project, userId) {
+  const userKey = String(userId);
+  const ownerId = project.ownerId?._id || project.ownerId;
+
+  if (String(ownerId) === userKey) {
+    return true;
+  }
+
+  return (project.memberIds || []).some((member) => String(member._id || member) === userKey);
+}
+
+function canManageProject(project, user) {
+  return ['org_admin', 'manager'].includes(user.role) || isProjectParticipant(project, user.userId);
+}
+
+function buildProjectBundle(project) {
+  const lines = [
+    `Project: ${project.name}`,
+    `Description: ${project.description || 'No description provided.'}`,
+    `Status: ${project.status}`,
+    `Progress: ${project.progressPercentage ?? 0}%`,
+    `Start Date: ${project.startDate ? new Date(project.startDate).toLocaleDateString() : 'Not set'}`,
+    `End Date: ${project.endDate ? new Date(project.endDate).toLocaleDateString() : 'Not set'}`,
+    `Submission Status: ${project.submissionStatus || 'Not Submitted'}`,
+    '',
+    'Open this folder in VS Code to continue development.',
+    'Then run the project using the repository scripts.'
+  ];
+
+  return lines.join('\n');
+}
+
+function slugify(value) {
+  return String(value || 'project')
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
 
 router.get('/', async (request, response) => {
   const {
     search = '',
     status = '',
+    mine = '',
     sort = 'newest',
     page = '1',
     pageSize = '5'
@@ -35,6 +102,11 @@ router.get('/', async (request, response) => {
     query.status = normalizedStatus;
   }
 
+  const onlyMyProjects = ['1', 'true', 'yes'].includes(String(mine).toLowerCase());
+  if (onlyMyProjects) {
+    query.$or = [{ ownerId: request.user.userId }, { memberIds: request.user.userId }];
+  }
+
   const sortMap = {
     newest: { createdAt: -1 },
     oldest: { createdAt: 1 },
@@ -49,7 +121,7 @@ router.get('/', async (request, response) => {
       .limit(currentPageSize)
       .populate('memberIds', '_id name email role')
       .populate('ownerId', '_id name email')
-      .select('_id organizationId name description status ownerId memberIds createdAt updatedAt'),
+      .select('_id organizationId name description status startDate endDate ownerId memberIds createdAt updatedAt'),
     Project.countDocuments(query)
   ]);
 
@@ -103,6 +175,15 @@ router.get('/:id', async (request, response) => {
     .limit(20)
     .select('_id actorName action message createdAt');
 
+  const comments = activity
+    .filter((item) => item.action === 'comment_added')
+    .map((item) => ({
+      _id: item._id,
+      actorName: item.actorName,
+      message: item.message,
+      createdAt: item.createdAt
+    }));
+
   const tasks = await Task.find({
     organizationId: request.user.organizationId,
     projectId: project._id
@@ -118,7 +199,310 @@ router.get('/:id', async (request, response) => {
     role: request.user.role
   });
 
-  response.json({ project, activity, tasks, assignableUsers });
+  response.json({ project, activity, comments, tasks, assignableUsers });
+});
+
+router.patch('/:id/progress', async (request, response) => {
+  const { progressPercentage } = request.body || {};
+  const numericProgress = Number(progressPercentage);
+
+  if (Number.isNaN(numericProgress) || numericProgress < 0 || numericProgress > 100) {
+    response.status(400).json({ error: 'Progress must be a number between 0 and 100.' });
+    return;
+  }
+
+  const project = await Project.findOne({
+    _id: request.params.id,
+    organizationId: request.user.organizationId
+  });
+
+  if (!project) {
+    response.status(404).json({ error: 'Project not found.' });
+    return;
+  }
+
+  if (!canManageProject(project, request.user)) {
+    response.status(403).json({ error: 'You cannot update progress for this project.' });
+    return;
+  }
+
+  project.progressPercentage = numericProgress;
+
+  if (numericProgress >= 100) {
+    project.status = 'Completed';
+  } else if (numericProgress > 0 && project.status === 'Pending') {
+    project.status = 'In Progress';
+  }
+
+  await project.save();
+
+  await logProjectActivity({
+    organizationId: request.user.organizationId,
+    projectId: project._id,
+    actorId: request.user.userId,
+    actorName: request.user.name,
+    action: 'progress_updated',
+    message: `Progress updated to ${numericProgress}% by ${request.user.name}`
+  });
+
+  const populatedProject = await Project.findById(project._id)
+    .populate('memberIds', '_id name email role')
+    .populate('ownerId', '_id name email role');
+
+  response.json({ project: populatedProject });
+});
+
+router.post('/:id/comments', async (request, response) => {
+  const { message } = request.body || {};
+  const normalizedMessage = String(message || '').trim();
+
+  if (!normalizedMessage) {
+    response.status(400).json({ error: 'Comment cannot be empty.' });
+    return;
+  }
+
+  const project = await Project.findOne({
+    _id: request.params.id,
+    organizationId: request.user.organizationId
+  });
+
+  if (!project) {
+    response.status(404).json({ error: 'Project not found.' });
+    return;
+  }
+
+  if (!canManageProject(project, request.user)) {
+    response.status(403).json({ error: 'You cannot comment on this project.' });
+    return;
+  }
+
+  const comment = await logProjectActivity({
+    organizationId: request.user.organizationId,
+    projectId: project._id,
+    actorId: request.user.userId,
+    actorName: request.user.name,
+    action: 'comment_added',
+    message: normalizedMessage
+  });
+
+  response.status(201).json({ comment });
+});
+
+router.patch('/:id/status', async (request, response) => {
+  const { status } = request.body || {};
+  if (!STATUS_VALUES.includes(status)) {
+    response.status(400).json({ error: 'Invalid project status.' });
+    return;
+  }
+
+  const project = await Project.findOne({
+    _id: request.params.id,
+    organizationId: request.user.organizationId
+  }).populate('memberIds', '_id name email role').populate('ownerId', '_id name email role');
+
+  if (!project) {
+    response.status(404).json({ error: 'Project not found.' });
+    return;
+  }
+
+  if (!canManageProject(project, request.user)) {
+    response.status(403).json({ error: 'You cannot update this project status.' });
+    return;
+  }
+
+  const previousStatus = project.status;
+  project.status = status;
+
+  if (status === 'Completed') {
+    project.progressPercentage = Math.max(project.progressPercentage || 0, 100);
+  } else if (status === 'In Progress' && project.progressPercentage === 0) {
+    project.progressPercentage = 25;
+  }
+
+  await project.save();
+
+  await logProjectActivity({
+    organizationId: request.user.organizationId,
+    projectId: project._id,
+    actorId: request.user.userId,
+    actorName: request.user.name,
+    action: status === 'In Progress' && previousStatus === 'Pending' ? 'project_started' : 'status_changed',
+    message:
+      status === 'In Progress' && previousStatus === 'Pending'
+        ? `Project started by ${request.user.name}`
+        : `Status changed to ${status} by ${request.user.name}`
+  });
+
+  const populatedProject = await Project.findById(project._id)
+    .populate('memberIds', '_id name email role')
+    .populate('ownerId', '_id name email role');
+
+  response.json({ project: populatedProject });
+});
+
+router.post('/:id/submit', upload.single('file'), async (request, response) => {
+  const { note = '', versionLabel = '' } = request.body || {};
+
+  const project = await Project.findOne({
+    _id: request.params.id,
+    organizationId: request.user.organizationId
+  }).populate('memberIds', '_id name email role').populate('ownerId', '_id name email role');
+
+  if (!project) {
+    response.status(404).json({ error: 'Project not found.' });
+    return;
+  }
+
+  if (!canManageProject(project, request.user)) {
+    response.status(403).json({ error: 'You cannot submit this project.' });
+    return;
+  }
+
+  if (!request.file) {
+    response.status(400).json({ error: 'Please upload a file.' });
+    return;
+  }
+
+  if (request.file.size > MAX_UPLOAD_SIZE) {
+    response.status(400).json({ error: 'File size exceeds 10 MB.' });
+    return;
+  }
+
+  const version = project.submissionVersion + 1;
+  const historyEntry = {
+    version,
+    note: String(note || versionLabel || '').trim(),
+    originalName: request.file.originalname,
+    fileName: request.file.filename,
+    filePath: request.file.path,
+    size: request.file.size,
+    mimeType: request.file.mimetype,
+    uploadedBy: request.user.userId,
+    uploadedAt: new Date()
+  };
+
+  project.submissionVersion = version;
+  project.submissionStatus = 'Submitted';
+  project.submissionNote = historyEntry.note;
+  project.submissionFileName = request.file.filename;
+  project.submissionOriginalName = request.file.originalname;
+  project.submissionFilePath = request.file.path;
+  project.submissionSubmittedAt = new Date();
+  project.submissionReviewedAt = null;
+  project.submissionReviewedBy = null;
+  project.submissionReviewNote = '';
+  project.submissionHistory.push(historyEntry);
+
+  await project.save();
+
+  await logProjectActivity({
+    organizationId: request.user.organizationId,
+    projectId: project._id,
+    actorId: request.user.userId,
+    actorName: request.user.name,
+    action: 'project_submitted',
+    message: `Project submitted as version ${version} by ${request.user.name}`
+  });
+
+  const populatedProject = await Project.findById(project._id)
+    .populate('memberIds', '_id name email role')
+    .populate('ownerId', '_id name email role')
+    .populate('submissionReviewedBy', '_id name email role');
+
+  response.status(201).json({ project: populatedProject });
+});
+
+router.patch('/:id/submission/review', async (request, response) => {
+  const { submissionStatus, reviewNote = '' } = request.body || {};
+
+  if (!SUBMISSION_VALUES.includes(submissionStatus)) {
+    response.status(400).json({ error: 'Invalid submission status.' });
+    return;
+  }
+
+  if (!['org_admin', 'manager'].includes(request.user.role)) {
+    response.status(403).json({ error: 'Only admins and managers can review submissions.' });
+    return;
+  }
+
+  const project = await Project.findOne({
+    _id: request.params.id,
+    organizationId: request.user.organizationId
+  }).populate('memberIds', '_id name email role').populate('ownerId', '_id name email role');
+
+  if (!project) {
+    response.status(404).json({ error: 'Project not found.' });
+    return;
+  }
+
+  if (project.submissionStatus === 'Not Submitted') {
+    response.status(400).json({ error: 'No submission is available to review.' });
+    return;
+  }
+
+  project.submissionStatus = submissionStatus;
+  project.submissionReviewedBy = request.user.userId;
+  project.submissionReviewedAt = new Date();
+  project.submissionReviewNote = String(reviewNote || '').trim();
+
+  if (submissionStatus === 'Approved') {
+    project.status = 'Completed';
+    project.progressPercentage = 100;
+  }
+
+  await project.save();
+
+  await logProjectActivity({
+    organizationId: request.user.organizationId,
+    projectId: project._id,
+    actorId: request.user.userId,
+    actorName: request.user.name,
+    action: 'submission_reviewed',
+    message: `Submission ${submissionStatus.toLowerCase()} by ${request.user.name}`
+  });
+
+  const populatedProject = await Project.findById(project._id)
+    .populate('memberIds', '_id name email role')
+    .populate('ownerId', '_id name email role')
+    .populate('submissionReviewedBy', '_id name email role');
+
+  response.json({ project: populatedProject });
+});
+
+router.get('/:id/download', async (request, response) => {
+  const project = await Project.findOne({
+    _id: request.params.id,
+    organizationId: request.user.organizationId
+  }).populate('memberIds', '_id name email role').populate('ownerId', '_id name email role');
+
+  if (!project) {
+    response.status(404).json({ error: 'Project not found.' });
+    return;
+  }
+
+  if (!canManageProject(project, request.user)) {
+    response.status(403).json({ error: 'You cannot download this project bundle.' });
+    return;
+  }
+
+  const fileName = `${slugify(project.name || 'project')}-bundle.zip`;
+  response.setHeader('Content-Type', 'application/zip');
+  response.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+
+  const archive = archiver('zip', { zlib: { level: 9 } });
+  archive.on('error', (error) => {
+    response.status(500).json({ error: error.message });
+  });
+
+  archive.pipe(response);
+  archive.append(buildProjectBundle(project), { name: 'README.txt' });
+  archive.append(JSON.stringify(project.toObject(), null, 2), { name: 'project.json' });
+
+  if (project.submissionHistory?.length) {
+    archive.append(JSON.stringify(project.submissionHistory, null, 2), { name: 'submission-history.json' });
+  }
+
+  await archive.finalize();
 });
 
 router.post('/', async (request, response) => {
@@ -127,10 +511,40 @@ router.post('/', async (request, response) => {
     return;
   }
 
-  const { name, description = '', memberIds = [] } = request.body || {};
+  const {
+    name,
+    description = '',
+    status = 'Pending',
+    startDate = null,
+    endDate = null,
+    memberIds = []
+  } = request.body || {};
 
   if (!name) {
     response.status(400).json({ error: 'Project name is required.' });
+    return;
+  }
+
+  if (!STATUS_VALUES.includes(status)) {
+    response.status(400).json({ error: 'Invalid project status.' });
+    return;
+  }
+
+  const normalizedStartDate = parseOptionalDate(startDate);
+  const normalizedEndDate = parseOptionalDate(endDate);
+
+  if (startDate && !normalizedStartDate) {
+    response.status(400).json({ error: 'Invalid start date.' });
+    return;
+  }
+
+  if (endDate && !normalizedEndDate) {
+    response.status(400).json({ error: 'Invalid end date.' });
+    return;
+  }
+
+  if (normalizedStartDate && normalizedEndDate && normalizedStartDate > normalizedEndDate) {
+    response.status(400).json({ error: 'Start date must be before or equal to end date.' });
     return;
   }
 
@@ -140,6 +554,9 @@ router.post('/', async (request, response) => {
     organizationId: request.user.organizationId,
     name: String(name).trim(),
     description: String(description).trim(),
+    status,
+    startDate: normalizedStartDate,
+    endDate: normalizedEndDate,
     ownerId: request.user.userId,
     memberIds: validMembers
   });
@@ -156,39 +573,101 @@ router.post('/', async (request, response) => {
   response.status(201).json({ project });
 });
 
-router.patch('/:id/status', async (request, response) => {
-  if (!['org_admin', 'manager'].includes(request.user.role)) {
-    response.status(403).json({ error: 'Only admins and managers can update project status.' });
+router.patch('/:id', async (request, response) => {
+  if (request.user.role !== 'org_admin') {
+    response.status(403).json({ error: 'Only organization admins can edit projects.' });
     return;
   }
 
-  const { status } = request.body || {};
-  if (!STATUS_VALUES.includes(status)) {
-    response.status(400).json({ error: 'Invalid project status.' });
+  const existingProject = await Project.findOne({
+    _id: request.params.id,
+    organizationId: request.user.organizationId
+  }).select('_id startDate endDate');
+
+  if (!existingProject) {
+    response.status(404).json({ error: 'Project not found.' });
+    return;
+  }
+
+  const updates = {};
+  const { name, description, status, startDate, endDate, memberIds } = request.body || {};
+
+  if (name !== undefined) {
+    if (!String(name).trim()) {
+      response.status(400).json({ error: 'Project name cannot be empty.' });
+      return;
+    }
+    updates.name = String(name).trim();
+  }
+
+  if (description !== undefined) {
+    updates.description = String(description).trim();
+  }
+
+  if (status !== undefined) {
+    if (!STATUS_VALUES.includes(status)) {
+      response.status(400).json({ error: 'Invalid project status.' });
+      return;
+    }
+    updates.status = status;
+  }
+
+  if (startDate !== undefined) {
+    const normalizedStartDate = parseOptionalDate(startDate);
+    if (startDate && !normalizedStartDate) {
+      response.status(400).json({ error: 'Invalid start date.' });
+      return;
+    }
+    updates.startDate = normalizedStartDate;
+  }
+
+  if (endDate !== undefined) {
+    const normalizedEndDate = parseOptionalDate(endDate);
+    if (endDate && !normalizedEndDate) {
+      response.status(400).json({ error: 'Invalid end date.' });
+      return;
+    }
+    updates.endDate = normalizedEndDate;
+  }
+
+  const effectiveStartDate = updates.startDate !== undefined ? updates.startDate : existingProject.startDate;
+  const effectiveEndDate = updates.endDate !== undefined ? updates.endDate : existingProject.endDate;
+
+  if (
+    (updates.startDate !== undefined || updates.endDate !== undefined) &&
+    effectiveStartDate &&
+    effectiveEndDate &&
+    effectiveStartDate > effectiveEndDate
+  ) {
+    response.status(400).json({ error: 'Start date must be before or equal to end date.' });
+    return;
+  }
+
+  if (memberIds !== undefined) {
+    updates.memberIds = await resolveOrganizationMembers(request.user.organizationId, memberIds);
+  }
+
+  if (!Object.keys(updates).length) {
+    response.status(400).json({ error: 'No project updates were provided.' });
     return;
   }
 
   const project = await Project.findOneAndUpdate(
     {
-      _id: request.params.id,
+      _id: existingProject._id,
       organizationId: request.user.organizationId
     },
-    { status },
+    updates,
     { new: true }
   ).populate('memberIds', '_id name email role');
-
-  if (!project) {
-    response.status(404).json({ error: 'Project not found.' });
-    return;
-  }
 
   await logProjectActivity({
     organizationId: request.user.organizationId,
     projectId: project._id,
     actorId: request.user.userId,
     actorName: request.user.name,
-    action: 'status_changed',
-    message: `Status changed to ${status} by ${request.user.name}`
+    action: 'project_updated',
+    message: `Project updated by ${request.user.name}`
   });
 
   response.json({ project });
@@ -432,7 +911,7 @@ async function resolveOrganizationMembers(organizationId, memberIds) {
 }
 
 async function logProjectActivity(entry) {
-  await ActivityLog.create(entry);
+  return ActivityLog.create(entry);
 }
 
 async function getAssignableUsers({ organizationId, project, role }) {
@@ -462,6 +941,19 @@ async function getAssignableUsers({ organizationId, project, role }) {
 async function findAssignableUser({ organizationId, project, assigneeId }) {
   const users = await getAssignableUsers({ organizationId, project, role: 'org_admin' });
   return users.find((user) => user._id.toString() === String(assigneeId)) || null;
+}
+
+function parseOptionalDate(value) {
+  if (!value) {
+    return null;
+  }
+
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+
+  return parsed;
 }
 
 export default router;

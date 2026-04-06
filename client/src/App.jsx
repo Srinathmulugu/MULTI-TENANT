@@ -6,6 +6,8 @@ import AdminUsersPage from './pages/AdminUsersPage.jsx';
 import Dashboard from './pages/Dashboard.jsx';
 import LoginPage from './pages/LoginPage.jsx';
 import ProjectDetailsPage from './pages/ProjectDetailsPage.jsx';
+import ProfilePage from './pages/ProfilePage.jsx';
+import SettingsPage from './pages/SettingsPage.jsx';
 
 export default function App() {
   const { user } = useAuth();
@@ -28,6 +30,24 @@ export default function App() {
         element={
           <ProtectedRoute role="org_admin">
             <AdminUsersPage />
+          </ProtectedRoute>
+        }
+      />
+
+      <Route
+        path="/profile"
+        element={
+          <ProtectedRoute>
+            <ProfilePage />
+          </ProtectedRoute>
+        }
+      />
+
+      <Route
+        path="/settings"
+        element={
+          <ProtectedRoute>
+            <SettingsPage />
           </ProtectedRoute>
         }
       />

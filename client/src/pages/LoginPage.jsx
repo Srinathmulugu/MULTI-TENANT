@@ -1,5 +1,5 @@
-import { useState, useMemo } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 
 import { useAuth } from '../context/AuthContext.jsx';
@@ -35,33 +35,16 @@ const orgThemes = {
 export default function LoginPage() {
   const { login, registerOrg } = useAuth();
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
   const [mode, setMode] = useState('login');
   const [error, setError] = useState('');
   const [form, setForm] = useState({
     organizationName: '',
-    organizationSlug: '',
     name: '',
     email: '',
     password: ''
   });
 
-  // Get org slug from URL or form
-  const orgSlug = searchParams.get('org') || form.organizationSlug;
-  
-  // Select theme based on org slug
-  const getOrgTheme = (slug) => {
-    if (!slug) return orgThemes.default;
-    const normalizedSlug = slug.toLowerCase().replace(/-/g, '');
-    
-    // Map slugs to themes
-    if (normalizedSlug.includes('acme')) return orgThemes.acme;
-    if (normalizedSlug.includes('tech')) return orgThemes.tech;
-    if (normalizedSlug.includes('startup')) return orgThemes.startup;
-    return orgThemes.default;
-  };
-
-  const orgTheme = getOrgTheme(orgSlug);
+  const orgTheme = orgThemes.default;
 
   async function onSubmit(event) {
     event.preventDefault();
@@ -71,11 +54,7 @@ export default function LoginPage() {
       if (mode === 'register') {
         await registerOrg(form);
       } else {
-        await login({
-          organizationSlug: form.organizationSlug,
-          email: form.email,
-          password: form.password
-        });
+        await login({ email: form.email, password: form.password });
       }
       navigate('/');
     } catch (submitError) {
@@ -241,18 +220,6 @@ export default function LoginPage() {
                     </div>
                   </motion.div>
                   <motion.div className="form-group" variants={itemVariants}>
-                    <label>Organization Slug</label>
-                    <div className="input-wrapper">
-                      <span className="input-icon">🔗</span>
-                      <input
-                        value={form.organizationSlug}
-                        onChange={(event) => setForm((prev) => ({ ...prev, organizationSlug: event.target.value }))}
-                        required
-                        placeholder="acme-corp"
-                      />
-                    </div>
-                  </motion.div>
-                  <motion.div className="form-group" variants={itemVariants}>
                     <label>Admin Name</label>
                     <div className="input-wrapper">
                       <span className="input-icon">👤</span>
@@ -265,21 +232,6 @@ export default function LoginPage() {
                     </div>
                   </motion.div>
                 </>
-              )}
-
-              {mode === 'login' && (
-                <motion.div className="form-group" variants={itemVariants}>
-                  <label>Organization Slug</label>
-                  <div className="input-wrapper">
-                    <span className="input-icon">🏢</span>
-                    <input
-                      value={form.organizationSlug}
-                      onChange={(event) => setForm((prev) => ({ ...prev, organizationSlug: event.target.value }))}
-                      required
-                      placeholder="acme-corp"
-                    />
-                  </div>
-                </motion.div>
               )}
 
               <motion.div className="form-group" variants={itemVariants}>

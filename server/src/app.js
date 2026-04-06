@@ -7,9 +7,22 @@ import adminRoutes from './routes/admin.js';
 
 const app = express();
 
+const allowedOrigins = new Set([process.env.CLIENT_ORIGIN].filter(Boolean));
+
+function isLocalDevOrigin(origin) {
+  return /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin);
+}
+
 app.use(
   cors({
-    origin: process.env.CLIENT_ORIGIN || 'http://localhost:5173'
+    origin(origin, callback) {
+      if (!origin || allowedOrigins.has(origin) || isLocalDevOrigin(origin)) {
+        callback(null, true);
+        return;
+      }
+
+      callback(new Error('Not allowed by CORS'));
+    }
   })
 );
 app.use(express.json());
